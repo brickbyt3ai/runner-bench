@@ -1,0 +1,99 @@
+name: runner-bench
+on:
+  workflow_dispatch:
+    inputs:
+      providers:
+        description: JSON list of providers (github, blacksmith)
+        default: '["github","blacksmith"]'
+      samples:
+        description: JSON list of sample numbers
+        default: '[1,2,3,4,5]'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  bench:
+    strategy:
+      fail-fast: false
+      matrix:
+        provider: ${{ fromJSON(inputs.providers) }}
+        sample: ${{ fromJSON(inputs.samples) }}
+    runs-on: ${{ matrix.provider == 'github' && 'ubuntu-24.04' || 'blacksmith-4vcpu-ubuntu-2404' }}
+    timeout-minutes: 30
+    env:
+      BENCH_TAG: ${{ matrix.provider }}-${{ matrix.sample }}-bench
+      KEY: bench-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.provider }}-${{ matrix.sample }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: install fio and sysbench
+        run: sudo apt-get update -q >/dev/null && sudo apt-get install -y -q fio sysbench >/dev/null && fio --version && sysbench --version
+      - name: sysinfo
+        run: ./bench.sh sysinfo
+      - name: cpu
+        run: ./bench.sh cpu
+      - name: disk
+        run: ./bench.sh disk
+      - name: generate cache data
+        run: ./bench.sh gen && du -sb data/big.bin data/small | tee results/sizes-$BENCH_TAG.txt
+      - run: echo "save_big_start=$(date +%s.%N)" >> results/times-$BENCH_TAG.txt
+      - name: save big
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: |
+            data/big.bin
+            data/big.sha256
+          key: ${{ env.KEY }}-big
+      - run: echo "save_big_end=$(date +%s.%N)" >> results/times-$BENCH_TAG.txt && echo "save_small_start=$(date +%s.%N)" >> results/times-$BENCH_TAG.txt
+      - name: save small
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: |
+            data/small
+            data/small.sha256
+          key: ${{ env.KEY }}-small
+      - run: echo "save_small_end=$(date +%s.%N)" >> results/times-$BENCH_TAG.txt && cat results/times-$BENCH_TAG.txt
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: result-${{ env.BENCH_TAG }}
+          path: results/
+  restore:
+    needs: bench
+    strategy:
+      fail-fast: false
+      matrix:
+        provider: ${{ fromJSON(inputs.providers) }}
+        sample: ${{ fromJSON(inputs.samples) }}
+    runs-on: ${{ matrix.provider == 'github' && 'ubuntu-24.04' || 'blacksmith-4vcpu-ubuntu-2404' }}
+    timeout-minutes: 20
+    env:
+      BENCH_TAG: ${{ matrix.provider }}-${{ matrix.sample }}-restore
+      KEY: bench-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.provider }}-${{ matrix.sample }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: sysinfo
+        run: ./bench.sh sysinfo
+      - run: echo "restore_big_start=$(date +%s.%N)" >> results/times-$BENCH_TAG.txt
+      - name: restore big
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: |
+            data/big.bin
+            data/big.sha256
+          key: ${{ env.KEY }}-big
+          fail-on-cache-miss: true
+      - run: echo "restore_big_end=$(date +%s.%N)" >> results/times-$BENCH_TAG.txt && echo "restore_small_start=$(date +%s.%N)" >> results/times-$BENCH_TAG.txt
+      - name: restore small
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: |
+            data/small
+            data/small.sha256
+          key: ${{ env.KEY }}-small
+          fail-on-cache-miss: true
+      - run: echo "restore_small_end=$(date +%s.%N)" >> results/times-$BENCH_TAG.txt && cat results/times-$BENCH_TAG.txt
+      - name: verify restored data
+        run: ./bench.sh verify
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: result-${{ env.BENCH_TAG }}
+          path: results/
